@@ -1,0 +1,8 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/estoque_torres}
+    username: ${DB_USER:estoque}
+    password: ${DB_PASSWORD:estoque}
+  h2:
+    console:
+      enabled: false
