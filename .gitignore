@@ -1,0 +1,14 @@
+# build / IDE
+api/target/
+api/data/
+*.iml
+.idea/
+.vscode/
+node_modules/
+
+# DADOS REAIS DE OBRA — nunca versionar
+web/dados-projeto.json
+*.xlsx
+*.xlsm
+*.xls
+!docs/exemplos/*.xlsx
