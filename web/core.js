@@ -49,10 +49,18 @@ var Core = (function () {
     b.forEach(function (q, k) { a.set(k, (a.get(k) || 0) + q); }); return a;
   }
   function disponivel(saldos, reservas, c, t, v) { return get(saldos, c, t, v) - get(reservas, c, t, v); }
+  // Para planejar, saldo negativo (erro de lançamento, sinalizado nos alertas) conta como zero: não existe peça negativa.
   function estoqueDo(saldos, reservas, c, tipo) {
     var o = {};
-    (tipo.volumes || []).forEach(function (v) { o[v.id] = disponivel(saldos, reservas, c, tipo.id, v.id); });
+    (tipo.volumes || []).forEach(function (v) { o[v.id] = Math.max(0, disponivel(saldos, reservas, c, tipo.id, v.id)); });
     return o;
+  }
+  /** Saldo físico (negativos zerados) + o que já está vindo para cada canteiro (solicitado ou em trânsito). */
+  function saldosComEntrada(saldos, entrando) {
+    var m = new Map();
+    saldos.forEach(function (q, k) { m.set(k, Math.max(0, q)); });
+    if (entrando) entrando.forEach(function (q, k) { m.set(k, (m.get(k) || 0) + q); });
+    return m;
   }
 
   // ---------- kit de uma torre ----------
@@ -169,11 +177,7 @@ var Core = (function () {
     opts = opts || {};
     var ativos = canteiros.filter(function (c) { return c.ativo !== false; });
     // O que já está vindo (solicitado ou em trânsito) conta no destino: evita sugerir duas vezes a mesma peça
-    if (opts.entrando && opts.entrando.size) {
-      var comEntrada = new Map(saldos);
-      opts.entrando.forEach(function (q, k) { comEntrada.set(k, (comEntrada.get(k) || 0) + q); });
-      saldos = comEntrada;
-    }
+    saldos = saldosComEntrada(saldos, opts.entrando);
     var base = alocarTipo(tipo, torresTipo, ativos, saldos, reservas, aplicado);
     var sobra = {}; ativos.forEach(function (c) { sobra[c.id] = Object.assign({}, base.sobra[c.id]); });
     var antes = 0; ativos.forEach(function (c) { antes += base.resumo[c.id].prontas; });
@@ -397,13 +401,92 @@ var Core = (function () {
     return o;
   }
 
+
+  // ===================== PRIORIDADE DE TRAMOS =====================
+  /**
+   * Distribui o estoque seguindo uma ordem de prioridade: primeiro as torres dos tramos (na ordem em que foram
+   * priorizados, e dentro de cada tramo na ordem da LC), depois — se opts.resto — as demais torres na ordem da LC.
+   * tramos: [{id, nome, deOp, ateOp, tipos?:[tipoId]}]
+   * opts: {escopo: 'canteiro' (só estoque do canteiro da torre) | 'obra' (pode puxar de outros canteiros), resto: bool}
+   */
+  function prioridade(tipos, torres, canteiros, saldos, reservas, aplicado, tramos, opts) {
+    opts = opts || {};
+    var ativos = canteiros.filter(function (c) { return c.ativo !== false; });
+    var tpById = {}; tipos.forEach(function (t) { tpById[t.id] = t; });
+    var est = {};
+    tipos.forEach(function (t) { est[t.id] = {}; ativos.forEach(function (c) { est[t.id][c.id] = estoqueDo(saldos, reservas, c.id, t); }); });
+    var porOp = torres.slice().sort(function (a, b) { return a.op - b.op; });
+    var ordem = [], visto = {};
+    tramos.forEach(function (tr, ti) {
+      var lo = Math.min(tr.deOp, tr.ateOp), hi = Math.max(tr.deOp, tr.ateOp);
+      porOp.forEach(function (t) {
+        if (visto[t.n] || t.op < lo || t.op > hi) return;
+        if (tr.tipos && tr.tipos.length && tr.tipos.indexOf(t.t) < 0) return;
+        visto[t.n] = 1; ordem.push({ t: t, tramo: ti });
+      });
+    });
+    if (opts.resto !== false) porOp.forEach(function (t) { if (!visto[t.n]) ordem.push({ t: t, tramo: -1 }); });
+    var res = {}, movs = [];
+    ordem.forEach(function (o) {
+      var t = o.t, tp = tpById[t.t]; if (!tp || !est[t.t][t.c]) return;
+      var st = statusTorre(tp, t, aplicado);
+      if (st === 'montada') { res[t.n] = { tramo: o.tramo, situacao: 'montada', status: st, falta: [], origem: [] }; return; }
+      var need = necessidade(tp, t, aplicado), own = est[t.t][t.c];
+      if (cobre(own, need)) { tirar(own, need); res[t.n] = { tramo: o.tramo, situacao: 'pronta', status: st, falta: [], origem: [] }; return; }
+      if (opts.escopo === 'obra' && o.tramo >= 0) { // transferência só para torres dos tramos priorizados
+        var plano = [], ok = true, falta = [];
+        for (var v in need) {
+          var q = need[v] - Math.max(0, own[v] || 0); if (q <= 0) continue;
+          var doad = ativos.filter(function (c) { return c.id !== t.c && (est[t.t][c.id][v] || 0) > 0; })
+            .sort(function (a, b) { return (est[t.t][b.id][v] || 0) - (est[t.t][a.id][v] || 0); });
+          for (var j = 0; j < doad.length && q > 0; j++) { var x = Math.min(q, est[t.t][doad[j].id][v]); plano.push({ origemId: doad[j].id, componenteId: v, qtd: x }); q -= x; }
+          if (q > 0) { ok = false; falta.push({ componenteId: v, qtd: q }); }
+        }
+        if (ok) {
+          plano.forEach(function (p) { est[t.t][p.origemId][p.componenteId] -= p.qtd; own[p.componenteId] = (own[p.componenteId] || 0) + p.qtd; movs.push({ origemId: p.origemId, destinoId: t.c, tipoId: t.t, componenteId: p.componenteId, qtd: p.qtd, n: t.n, tramo: o.tramo }); });
+          tirar(own, need);
+          res[t.n] = { tramo: o.tramo, situacao: 'pronta_transf', status: st, falta: [], origem: plano };
+          return;
+        }
+        res[t.n] = { tramo: o.tramo, situacao: 'incompleta', status: st, falta: falta, origem: [] };
+        return;
+      }
+      res[t.n] = { tramo: o.tramo, situacao: 'incompleta', status: st, falta: faltaContra(own, need), origem: [] };
+    });
+    // resumo por tramo
+    var resumo = tramos.map(function (tr, ti) {
+      var ts = ordem.filter(function (o) { return o.tramo === ti; }).map(function (o) { return o.t; });
+      var r = { total: ts.length, montada: 0, pronta: 0, pronta_transf: 0, incompleta: 0, quase: 0, maiorSeq: 0, seqDe: null, seqAte: null, faltas: {}, torres: ts.map(function (t) { return t.n; }) };
+      var seq = 0, ini = null;
+      ts.forEach(function (t) {
+        var x = res[t.n]; if (!x) return; r[x.situacao]++;
+        var ok = x.situacao !== 'incompleta';
+        if (ok) { if (!seq) ini = t.n; seq++; if (seq > r.maiorSeq) { r.maiorSeq = seq; r.seqDe = ini; r.seqAte = t.n; } } else seq = 0;
+        if (!ok) {
+          var tot = x.falta.reduce(function (a, f) { return a + f.qtd; }, 0); if (tot <= 2) r.quase++;
+          x.falta.forEach(function (f) { var k = t.t + '|' + f.componenteId, g = r.faltas[k] = r.faltas[k] || { tipoId: t.t, componenteId: f.componenteId, qtd: 0, torres: 0 }; g.qtd += f.qtd; g.torres++; });
+        }
+      });
+      r.faltas = Object.keys(r.faltas).map(function (k) { return r.faltas[k]; }).sort(function (a, b) { return b.torres - a.torres || b.qtd - a.qtd; });
+      return r;
+    });
+    // transferências agregadas
+    var porPar = {};
+    movs.forEach(function (m) {
+      var k = m.origemId + '>' + m.destinoId + '>' + m.tipoId, x = porPar[k] = porPar[k] || { origemId: m.origemId, destinoId: m.destinoId, tipoId: m.tipoId, itens: {}, torres: [], tramos: {} };
+      x.itens[m.componenteId] = (x.itens[m.componenteId] || 0) + m.qtd; if (x.torres.indexOf(m.n) < 0) x.torres.push(m.n); x.tramos[m.tramo] = 1;
+    });
+    var transfs = Object.keys(porPar).map(function (k) { var x = porPar[k]; return { origemId: x.origemId, destinoId: x.destinoId, tipoId: x.tipoId, torres: x.torres, tramos: Object.keys(x.tramos).map(Number), itens: itensDeMapa(x.itens) }; });
+    return { torres: res, tramos: resumo, transferencias: transfs };
+  }
+
   return {
     NATUREZAS: NATUREZAS, STATUS_TRANSF: STATUS_TRANSF, key: key, get: get, fmt: fmt,
-    calcularSaldos: calcularSaldos, calcularReservas: calcularReservas, calcularTransito: calcularTransito, calcularEntrando: calcularEntrando,
+    calcularSaldos: calcularSaldos, calcularReservas: calcularReservas, calcularTransito: calcularTransito, calcularEntrando: calcularEntrando, saldosComEntrada: saldosComEntrada,
     disponivel: disponivel, estoqueDo: estoqueDo, porGrupo: porGrupo, gruposDaTorre: gruposDaTorre, kitDaTorre: kitDaTorre,
     aplicadoPorTorre: aplicadoPorTorre, necessidade: necessidade, statusTorre: statusTorre,
     alocarTipo: alocarTipo, sugerirRemanejamento: sugerirRemanejamento, maximoTeorico: maximoTeorico,
-    validarSaida: validarSaida, lerPlanilhaNFs: lerPlanilhaNFs, lerResumoNFs: lerResumoNFs, conferirNFs: conferirNFs, precoPorFornecedor: precoPorFornecedor, recebidoPorSemana: recebidoPorSemana, ehEstrutura: ehEstrutura, nfsDoMov: nfsDoMov, fornecedorDoMov: fornecedorDoMov, serialData: serialData, podeTransitar: podeTransitar, pesoItens: pesoItens, itensDeMapa: itensDeMapa, cobre: cobre
+    validarSaida: validarSaida, prioridade: prioridade, lerPlanilhaNFs: lerPlanilhaNFs, lerResumoNFs: lerResumoNFs, conferirNFs: conferirNFs, precoPorFornecedor: precoPorFornecedor, recebidoPorSemana: recebidoPorSemana, ehEstrutura: ehEstrutura, nfsDoMov: nfsDoMov, fornecedorDoMov: fornecedorDoMov, serialData: serialData, podeTransitar: podeTransitar, pesoItens: pesoItens, itensDeMapa: itensDeMapa, cobre: cobre
   };
 })();
 if (typeof module !== 'undefined') module.exports = Core;
