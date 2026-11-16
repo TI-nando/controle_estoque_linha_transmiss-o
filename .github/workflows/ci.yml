@@ -1,6 +1,11 @@
 name: CI
 on: [push, pull_request]
 jobs:
+  dados-sensiveis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ferramentas/seguranca/verificar_dados_sensiveis.py
   web:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: web } }

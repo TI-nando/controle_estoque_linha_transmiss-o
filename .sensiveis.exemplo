@@ -1,0 +1,6 @@
+# Copie para .sensiveis.local (fica fora do git) e liste, um por linha, os termos do SEU projeto real
+# que nunca podem aparecer no repositório: nome da obra/LT, da empresa contratante, da empreiteira,
+# dos canteiros, dos fornecedores, nomes de pessoas, números de pedido etc.
+# Exemplo:
+# Nome da Minha Obra
+# Cidade do Canteiro

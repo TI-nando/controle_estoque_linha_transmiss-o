@@ -12,3 +12,18 @@ web/dados-projeto.json
 *.xlsm
 *.xls
 !docs/exemplos/*.xlsx
+
+# Documentos que carregam dados reais (NFs, romaneios, exportações, backups)
+*.pdf
+*.csv
+*-nfe.xml
+NFe*.xml
+!docs/exemplos/*
+backup-estoque*.json
+web/dados-*.json
+!web/dados-demo.json
+# Desenhos do seu projeto (o repositório usa web/figuras-genericas.css)
+web/figuras.css
+web/img/
+# Lista privada de termos sensíveis
+.sensiveis.local

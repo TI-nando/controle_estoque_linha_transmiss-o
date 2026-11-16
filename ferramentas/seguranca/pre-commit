@@ -1,0 +1,4 @@
+#!/bin/sh
+# Hook de pre-commit: impede commit de planilhas, NFs e termos do projeto real.
+# Instalar:  ln -s ../../ferramentas/seguranca/pre-commit .git/hooks/pre-commit
+exec python3 "$(git rev-parse --show-toplevel)/ferramentas/seguranca/verificar_dados_sensiveis.py" --staged
